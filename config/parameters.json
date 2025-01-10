@@ -1,0 +1,22 @@
+{
+  "time_points": 96,
+  "battery": {
+    "max_power": 1000,
+    "capacity": 2800,
+    "initial_soc": 0.2
+  },
+  "load": {
+    "base_night": 300,
+    "base_day": 700,
+    "random_range": 100
+  },
+  "pv": {
+    "base_power": 150,
+    "random_range": 50
+  },
+  "price": {
+    "off_peak": 0.36,
+    "mid_peak": 0.69,
+    "on_peak": 1.23
+  }
+}
