@@ -1,9 +1,11 @@
 {
   "time_points": 96,
+  "load_csv": null,
+  "pv_csv": null,
   "battery": {
-    "max_power": 1000,
-    "capacity": 2800,
-    "initial_soc": 0.2
+    "capacity": 1000,
+    "max_power": 200,
+    "initial_soc": 0.5
   },
   "load": {
     "base_night": 300,
