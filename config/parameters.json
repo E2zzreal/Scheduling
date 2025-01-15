@@ -3,9 +3,9 @@
   "load_csv": null,
   "pv_csv": null,
   "battery": {
-    "capacity": 1000,
-    "max_power": 200,
-    "initial_soc": 0.5
+    "capacity": 2800,
+    "max_power": 1000,
+    "initial_soc": 0.25
   },
   "load": {
     "base_night": 300,
@@ -13,7 +13,7 @@
     "random_range": 100
   },
   "pv": {
-    "base_power": 150,
+    "base_power": 250,
     "random_range": 50
   },
   "price": {

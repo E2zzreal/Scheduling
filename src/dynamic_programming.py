@@ -1,9 +1,3 @@
-import numpy as np
-import pandas as pd
-import json
-from .utils import (generate_load_curve, generate_pv_curve, get_electricity_price,
-                   load_curve_from_csv, pv_curve_from_csv, plot_scheduling_results)
-
 """
 动态规划调度算法
 
@@ -22,8 +16,17 @@ from .utils import (generate_load_curve, generate_pv_curve, get_electricity_pric
 - 最优调度方案
 - 总运行成本
 """
+import numpy as np
+import pandas as pd
+import json
+from .utils import (generate_load_curve, generate_pv_curve, get_electricity_price,
+                   load_curve_from_csv, pv_curve_from_csv, plot_scheduling_results)
 import json
 from typing import List, Tuple
+
+# 读取配置文件
+with open('config/parameters.json') as f:
+    params = json.load(f)
 
 def dp_scheduling(params: dict) -> Tuple[List[float], List[float], List[float]]:
     # 参数提取
@@ -94,6 +97,21 @@ def dp_scheduling(params: dict) -> Tuple[List[float], List[float], List[float]]:
     # 可视化结果
     plot_scheduling_results(time, load, pv, 
                           np.array(charge) - np.array(discharge),
-                          soc_values, net_load)
+                          soc_values, net_load,
+                          save_path='results/scheduling_results-dp.png')
     
     return charge, discharge, soc_values[:-1]
+
+
+if __name__ == "__main__":
+    # 读取配置文件
+    with open('config/parameters.json') as f:
+        params = json.load(f)
+    
+    # 运行模糊逻辑调度
+    charge, discharge, soc = dp_scheduling(params)
+    
+    # 打印结果
+    print("充电功率:", charge)
+    print("放电功率:", discharge)
+    print("SOC变化:", soc)

@@ -49,6 +49,7 @@
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import json
 from pulp import LpProblem, LpVariable, lpSum, LpMinimize, value
 from utils import generate_load_curve, generate_pv_curve, get_electricity_price, load_curve_from_csv, pv_curve_from_csv
 
@@ -93,7 +94,7 @@ for i in range(time_points):
     prob += discharge[i] <= battery['max_power'] * (1 - is_charging[i])
     
     if i > 0:
-        prob += soc[i] == soc[i-1] + charge[i]*0.25 - discharge[i]*0.25
+        prob += soc[i] == soc[i-1] + charge[i]*0.25*0.95 - discharge[i]*0.25/0.95
     
     prob += load[i] - pv[i] - discharge[i] + charge[i] >= 30
     
@@ -116,4 +117,4 @@ soc_values = np.array([value(soc[i]) for i in range(time_points)]) / battery['ca
 
 # 可视化结果
 from utils import plot_scheduling_results
-plot_scheduling_results(time, load, pv, battery_power, soc_values, net_load)
+plot_scheduling_results(time, load, pv, battery_power, soc_values, net_load, save_path='results/scheduling_results-MILP.png')

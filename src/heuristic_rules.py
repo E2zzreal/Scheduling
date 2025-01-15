@@ -78,6 +78,20 @@ def heuristic_scheduling(params: dict) -> Tuple[List[float], List[float], List[f
     # 可视化结果
     plot_scheduling_results(time, load, pv,
                           np.array(charge) - np.array(discharge),
-                          soc, net_load)
+                          soc, net_load,
+                          save_path='results/scheduling_results-heuristic.png')
             
     return charge, discharge, soc[:-1]
+
+if __name__ == "__main__":
+    # 读取配置文件
+    with open('config/parameters.json') as f:
+        params = json.load(f)
+    
+    # 运行模糊逻辑调度
+    charge, discharge, soc = heuristic_scheduling(params)
+    
+    # 打印结果
+    print("充电功率:", charge)
+    print("放电功率:", discharge)
+    print("SOC变化:", soc)
