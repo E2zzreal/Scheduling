@@ -63,12 +63,12 @@ time = np.linspace(0, 24, time_points)
 
 # 生成或读取负荷和光伏曲线
 if params.get('load_csv'):
-    load = load_curve_from_csv(params['load_csv'])
+    load = load_curve_from_csv(r'data\load.csv')
 else:
     load = generate_load_curve(time)
 
 if params.get('pv_csv'):  
-    pv = pv_curve_from_csv(params['pv_csv'])
+    pv = pv_curve_from_csv(r'data\pv.csv')
 else:
     pv = generate_pv_curve(time)
 
@@ -86,7 +86,7 @@ is_charging = LpVariable.dicts("IsCharging", range(time_points), cat="Binary")
 
 # 目标函数
 prob += lpSum([(load[i] - pv[i] - discharge[i] + charge[i]) * 
-              get_electricity_price(time[i]) for i in range(time_points)])
+              get_electricity_price(time[i]) *0.25 for i in range(time_points)])
 
 # 约束条件
 for i in range(time_points):
@@ -97,6 +97,7 @@ for i in range(time_points):
         prob += soc[i] == soc[i-1] + charge[i]*0.25*0.95 - discharge[i]*0.25/0.95
     
     prob += load[i] - pv[i] - discharge[i] + charge[i] >= 30
+    prob += load[i] - pv[i] - discharge[i] + charge[i] <= 700
     
     if i > 0:
         prob += soc[i-1] + charge[i]*0.25 - discharge[i]*0.25 >= 0.1 * battery['capacity']
@@ -118,3 +119,4 @@ soc_values = np.array([value(soc[i]) for i in range(time_points)]) / battery['ca
 # 可视化结果
 from utils import plot_scheduling_results
 plot_scheduling_results(time, load, pv, battery_power, soc_values, net_load, save_path='results/scheduling_results-MILP.png')
+pd.DataFrame({'load':net_load,'power':battery_power,'SOC':soc_values}).to_csv('results/net_load.csv')

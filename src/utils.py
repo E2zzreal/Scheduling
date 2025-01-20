@@ -56,10 +56,12 @@ def get_electricity_price(t):
     """
     if 0 <= t < 6 or 22 <= t <= 24:
         return params['price']['off_peak']
-    elif (6 <= t < 8) or (13 <= t < 16) or (19 <= t < 22):
+    elif (6 <= t < 8) or (11 <= t < 18) or (21 <= t < 22):
         return params['price']['mid_peak']
-    else:
+    elif (8 <= t < 11) or (18 <= t < 19):
         return params['price']['on_peak']
+    else:
+        return params['price']['rush_hour']
 
 def plot_scheduling_results(time, load, pv, battery_power, soc_values, net_load, save_path='results/scheduling_results.png'):
     """可视化调度结果

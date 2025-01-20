@@ -1,11 +1,11 @@
 {
   "time_points": 96,
-  "load_csv": null,
-  "pv_csv": null,
+  "load_csv": 1,
+  "pv_csv": 1,
   "battery": {
     "capacity": 2800,
     "max_power": 1000,
-    "initial_soc": 0.25
+    "initial_soc": 0.55
   },
   "load": {
     "base_night": 300,
@@ -17,8 +17,9 @@
     "random_range": 50
   },
   "price": {
-    "off_peak": 0.36,
-    "mid_peak": 0.69,
-    "on_peak": 1.23
+    "off_peak": 0.3358,
+    "mid_peak": 0.7257,
+    "on_peak": 1.2455,
+    "rush_hour": 1.5379
   }
 }
