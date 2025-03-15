@@ -2,6 +2,7 @@ import numpy as np
 import json
 import matplotlib.pyplot as plt
 import pandas as pd
+import os
 
 # 读取配置文件
 with open('config/parameters.json') as f:
@@ -63,7 +64,8 @@ def get_electricity_price(t):
     else:
         return params['price']['rush_hour']
 
-def plot_scheduling_results(time, load, pv, battery_power, soc_values, net_load, save_path='results/scheduling_results.png'):
+def plot_scheduling_results(time, load, pv, battery_power, soc_values, net_load, 
+                          save_dir='results', filename_prefix='output'):
     """可视化调度结果
     
     参数:
@@ -73,11 +75,30 @@ def plot_scheduling_results(time, load, pv, battery_power, soc_values, net_load,
     battery_power (np.array): 电池功率曲线
     soc_values (np.array): SOC曲线
     net_load (np.array): 净负荷曲线
-    save_path (str): 图片保存路径
+    save_dir (str): 保存目录路径
+    filename_prefix (str): 文件前缀
     
     返回:
     None
     """
+    # 创建保存目录
+    os.makedirs(save_dir, exist_ok=True)
+    
+    # 生成标准化文件名
+    plot_path = f"{save_dir}/{filename_prefix}_scheduling_plot.png"
+    data_path = f"{save_dir}/{filename_prefix}_scheduling_data.csv"
+    
+    # 保存数据到CSV
+    pd.DataFrame({
+        'time': time,
+        'load': load,
+        'pv': pv,
+        'battery_power': battery_power,
+        'soc': soc_values,
+        'net_load': net_load
+    }).to_csv(data_path, index=False)
+    
+    # 绘制图表
     fig, axs = plt.subplots(3, 1, figsize=(14, 15))
 
     # 负荷和光伏曲线
@@ -113,8 +134,8 @@ def plot_scheduling_results(time, load, pv, battery_power, soc_values, net_load,
     axs[2].grid()
 
     plt.tight_layout()
-    plt.savefig(save_path)
-    plt.show()
+    plt.savefig(plot_path, dpi=300)
+    plt.close()
 
 def load_curve_from_csv(file_path):
     """从CSV文件读取负荷曲线

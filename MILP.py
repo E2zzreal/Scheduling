@@ -72,80 +72,89 @@ if params.get('pv_csv'):  # 如果配置中指定了从CSV读取光伏曲线
 else:  # 否则生成模拟光伏曲线
     pv = generate_pv_curve(time)  # 调用工具函数生成光伏曲线
 
-# 创建MILP问题
-prob = LpProblem("Battery_Scheduling", LpMinimize)  # 创建线性规划问题，目标是最小化
-
-# 定义决策变量
-battery = params['battery']  # 获取电池参数
-soc = LpVariable.dicts("SOC", range(time_points), 0.1 * battery['capacity'], battery['capacity'])  # 定义SOC变量
-soc[0] = battery['initial_soc'] * battery['capacity']  # 设置初始SOC值
-
-charge = LpVariable.dicts("Charge", range(time_points), 0, 0.5 * battery['max_power'])  # 定义充电功率变量
-discharge = LpVariable.dicts("Discharge", range(time_points), 0, battery['max_power'])  # 定义放电功率变量
-is_charging = LpVariable.dicts("IsCharging", range(time_points), cat="Binary")  # 定义充电状态指示变量（0/1）
-
-# 目标函数
-prob += lpSum([(load[i] - pv[i] - discharge[i] + charge[i]) * 
-              get_electricity_price(time[i]) *0.25 for i in range(time_points)])  # 最小化总用电成本
-
-# 约束条件
-for i in range(time_points):  # 遍历每个时间点
-    # 充电功率约束
-    prob += charge[i] <= battery['max_power'] * is_charging[i]  # 充电功率不超过最大功率
-    # 放电功率约束
-    prob += discharge[i] <= battery['max_power'] * (1 - is_charging[i])  # 放电功率不超过最大功率
+def optimize_schedule(time_points, battery_params, load, pv, time):
+    """执行MILP优化调度"""
+    prob = LpProblem("Battery_Scheduling", LpMinimize)
     
-    if i > 0:  # 对于非初始时间点
-        # SOC状态转移方程
-        prob += soc[i] == soc[i-1] + charge[i]*0.25*0.95 - discharge[i]*0.25/0.95  # 考虑充放电效率
+    # 定义决策变量
+    soc = LpVariable.dicts("SOC", range(time_points), 
+                         0.1 * battery_params['capacity'], 
+                         battery_params['capacity'])
+    soc[0] = battery_params['initial_soc'] * battery_params['capacity']
     
-    # 功率平衡约束
-    prob += load[i] - pv[i] - discharge[i] + charge[i] >= 30  # 最小负荷约束
-    prob += load[i] - pv[i] - discharge[i] + charge[i] <= 700  # 最大负荷约束
-    
-    if i > 0:  # 对于非初始时间点
-        # SOC范围约束
-        prob += soc[i-1] + charge[i]*0.25 - discharge[i]*0.25 >= 0.1 * battery['capacity']  # 最小SOC
-        prob += soc[i-1] + charge[i]*0.25 - discharge[i]*0.25 <= battery['capacity']  # 最大SOC
-    
-    if i == time_points - 1:  # 对于最后一个时间点
-        # 最终SOC约束
-        prob += soc[i] == battery['initial_soc'] * battery['capacity']  # 最终SOC等于初始SOC
+    charge = LpVariable.dicts("Charge", range(time_points), 
+                            0, 0.5 * battery_params['max_power'])
+    discharge = LpVariable.dicts("Discharge", range(time_points),
+                               0, battery_params['max_power'])
+    is_charging = LpVariable.dicts("IsCharging", 
+                                 range(time_points), cat="Binary")
 
-# 求解问题
-prob.solve()  # 调用求解器求解优化问题
+    # 目标函数
+    prob += lpSum([(load[i] - pv[i] - discharge[i] + charge[i]) * 
+                  get_electricity_price(time[i]) *0.25 for i in range(time_points)])
 
-# 获取优化结果
-charge_opt = np.array([value(charge[i]) for i in range(time_points)])  # 获取最优充电功率
-discharge_opt = np.array([value(discharge[i]) for i in range(time_points)])  # 获取最优放电功率
-battery_power = charge_opt - discharge_opt  # 计算电池净功率
-net_load = load - pv - discharge_opt + charge_opt  # 计算净负荷
-soc_values = np.array([value(soc[i]) for i in range(time_points)]) / battery['capacity'] * 100  # 计算SOC百分比
+    # 约束条件
+    for i in range(time_points):
+        prob += charge[i] <= battery_params['max_power'] * is_charging[i]
+        prob += discharge[i] <= battery_params['max_power'] * (1 - is_charging[i])
+        
+        if i > 0:
+            prob += soc[i] == soc[i-1] + charge[i]*0.25*0.95 - discharge[i]*0.25/0.95
+        
+        prob += load[i] - pv[i] - discharge[i] + charge[i] >= 30
+        prob += load[i] - pv[i] - discharge[i] + charge[i] <= 700
+        
+        if i > 0:
+            prob += soc[i-1] + charge[i]*0.25 - discharge[i]*0.25 >= 0.1 * battery_params['capacity']
+            prob += soc[i-1] + charge[i]*0.25 - discharge[i]*0.25 <= battery_params['capacity']
+        
+        if i == time_points - 1:
+            prob += soc[i] == battery_params['initial_soc'] * battery_params['capacity']
+
+    prob.solve()
+    
+    # 提取结果
+    charge_opt = np.array([value(charge[i]) for i in range(time_points)])
+    discharge_opt = np.array([value(discharge[i]) for i in range(time_points)])
+    return {
+        'charge': charge_opt,
+        'discharge': discharge_opt,
+        'soc': np.array([value(soc[i]) for i in range(time_points)]) / battery_params['capacity'] * 100,
+        'net_load': load - pv - discharge_opt + charge_opt
+    }
+
+# 调用优化函数
+battery = params['battery']
+results = optimize_schedule(time_points, battery, load, pv, time)
+charge_opt = results['charge']
+discharge_opt = results['discharge']
+battery_power = charge_opt - discharge_opt
+net_load = results['net_load']
+soc_values = results['soc']
 
 # 可视化结果
 from utils import plot_scheduling_results  # 导入绘图函数
-from scenario_analysis import ScenarioAnalyzer  # 导入场景分析模块
 
 
 def run_single_scenario():
     """运行单场景优化"""
-    plot_scheduling_results(time, load, pv, battery_power, soc_values, net_load, save_path=r'results\scheduling_results-MILP.png')  # 绘制调度结果
-    pd.DataFrame({'load':net_load,'power':battery_power,'SOC':soc_values}).to_csv(r'results\net_load.csv')  # 保存结果到CSV
-
-def run_scenario_analysis():
-    """运行多场景分析"""
-    analyzer = ScenarioAnalyzer(params)  # 创建场景分析器
-    results = analyzer.run_analysis()  # 运行场景分析
-    analyzer.save_results()  # 保存分析结果
-    analyzer.plot_results()  # 绘制分析结果
+    # 绘制并保存调度结果
+    plot_scheduling_results(
+        time=time,
+        load=load,
+        pv=pv,
+        battery_power=battery_power,
+        soc_values=soc_values,
+        net_load=net_load,
+        save_dir='results',
+        filename_prefix='MILP'
+    )
+    # 保存结果到CSV
+    pd.DataFrame({
+        'load': net_load,
+        'power': battery_power,
+        'SOC': soc_values
+    }).to_csv(r'results\net_load.csv')
 
 if __name__ == "__main__":
-    import argparse  # 导入命令行参数解析模块
-    parser = argparse.ArgumentParser()  # 创建参数解析器
-    parser.add_argument('--scenario', action='store_true', help='Run scenario analysis')  # 添加场景分析参数
-    args = parser.parse_args()  # 解析命令行参数
-    
-    if args.scenario:  # 如果指定了场景分析模式
-        run_scenario_analysis()  # 运行场景分析
-    else:  # 否则
-        run_single_scenario()  # 运行单场景优化
+    run_single_scenario()  # 运行单场景优化
