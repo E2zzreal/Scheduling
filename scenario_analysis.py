@@ -23,6 +23,9 @@ from tqdm import tqdm  # 导入tqdm库用于进度条显示
 from pulp import LpProblem, LpVariable, lpSum, LpMinimize, value, PULP_CBC_CMD  # 导入线性规划类及求解器
 from utils import generate_load_curve, generate_pv_curve, get_electricity_price  # 导入自定义工具函数
 
+import matplotlib.pyplot as plt  # 导入matplotlib用于绘图
+import seaborn as sns  # 导入seaborn用于美化图表
+
 class ScenarioAnalyzer:
     def __init__(self, params, num_scenarios=1000, true_load=None, true_pv=None):
         """
@@ -44,7 +47,7 @@ class ScenarioAnalyzer:
             np.linspace(0, 24, self.params['time_points'])
         )  # 设置真实光伏
         
-    def generate_scenarios(self, accuracy_level):
+    def generate_scenarios_accurancy(self, accuracy_level):
         """
         生成指定准确度水平的负荷和光伏场景
         
@@ -65,14 +68,40 @@ class ScenarioAnalyzer:
                 (1 - accuracy_level) * self.params['load']['random_range'],
                 size=self.params['time_points'])
                 
-            pv_noise = np.random.normal(0,
-                (1 - accuracy_level) * self.params['pv']['random_range'],
-                size=self.params['time_points'])
                 
             # 添加噪声到基准曲线
             scenarios.append({
                 'load': base_load + load_noise,
-                'pv': base_pv + pv_noise
+                'pv': base_pv
+            })
+        return scenarios
+    
+    def generate_scenarios_error(self, error):
+        """
+        生成指定准确度水平的负荷和光伏场景
+        
+        参数：
+        accuracy_level：预测准确度（0到1之间）
+        
+        返回：
+        包含负荷和光伏曲线的场景列表
+        """
+        # 使用固定的真实负荷和光伏作为基准
+        base_load = self.true_load
+        base_pv = self.true_pv
+        
+        scenarios = []
+        for _ in range(self.num_scenarios):
+            # 根据准确度水平生成噪声
+            load_noise = np.random.normal(error, 
+                0.5*error,
+                size=self.params['time_points'])
+                
+                
+            # 添加噪声到基准曲线
+            scenarios.append({
+                'load': base_load + np.random.choice([-1, 1])*load_noise,
+                'pv': base_pv
             })
         return scenarios
 
@@ -92,10 +121,10 @@ class ScenarioAnalyzer:
         raw_net_load = true_load - true_pv - schedule['discharge_power'] + schedule['charge_power']
         # 应用下限约束
         real_net_load = np.where(raw_net_load < 30, 30, raw_net_load)
-        return sum(real_net_load[i] * get_electricity_price(i) * 0.25 
+        return real_net_load, sum(real_net_load[i] * get_electricity_price(i) * 0.25 
                   for i in range(len(true_load)))
 
-    def run_analysis(self, accuracy_levels=[0.7, 0.8, 0.9, 0.95]):
+    def run_analysis(self, type = 'accuracy', accuracy_levels=[0.7, 0.8, 0.9, 0.95], error_levels=[30,50,100,150]):
         """
         运行多准确度水平的场景分析
         
@@ -111,27 +140,48 @@ class ScenarioAnalyzer:
             'load': self.true_load,
             'pv': self.true_pv
         })
-        self.true_cost = self._calculate_real_cost(true_schedule, self.true_load, self.true_pv)
-        
-        for accuracy in accuracy_levels:
-            print(f"正在运行准确度水平为 {accuracy*100}% 的分析")
-            scenarios = self.generate_scenarios(accuracy)  # 生成场景
-            
-            # 使用并行处理运行场景
-            scenario_results = joblib.Parallel(n_jobs=-1)(
-                joblib.delayed(self._run_scenario)(scenario)
-                for scenario in tqdm(scenarios)
-            )
-            
-            # 计算每个场景的真实成本
-            for result in scenario_results:
-                result['real_cost'] = self._calculate_real_cost(
-                    result['schedule'], 
-                    self.true_load,
-                    self.true_pv
+        self.true_battery_power = np.array(true_schedule['charge_power']) - np.array(true_schedule['discharge_power'])
+        self.true_net_load, self.true_cost = self._calculate_real_cost(true_schedule, self.true_load, self.true_pv)
+        if type == 'accuracy':
+            for accuracy in accuracy_levels:
+                print(f"正在运行准确度水平为 {accuracy*100}% 的分析")
+                scenarios = self.generate_scenarios_accurancy(accuracy)  # 生成场景
+                        # 使用并行处理运行场景
+                scenario_results = joblib.Parallel(n_jobs=-1)(
+                    joblib.delayed(self._run_scenario)(scenario)
+                    for scenario in tqdm(scenarios)
                 )
+                
+                # 计算每个场景的真实成本
+                for result in scenario_results:
+                    result['true_load'], result['real_cost'] = self._calculate_real_cost(
+                        result['schedule'], 
+                        self.true_load,
+                        self.true_pv
+                    )
+                
+                results[accuracy] = scenario_results  # 保存结果
+
+        elif type == 'error':
+            for error in error_levels:
+                print(f"正在运行误差水平为 {error} 的分析")
+                scenarios = self.generate_scenarios_error(error) # 生成场景
             
-            results[accuracy] = scenario_results  # 保存结果
+                # 使用并行处理运行场景
+                scenario_results = joblib.Parallel(n_jobs=-1)(
+                    joblib.delayed(self._run_scenario)(scenario)
+                    for scenario in tqdm(scenarios)
+                )
+                
+                # 计算每个场景的真实成本
+                for result in scenario_results:
+                    result['true_load'], result['real_cost'] = self._calculate_real_cost(
+                        result['schedule'], 
+                        self.true_load,
+                        self.true_pv
+                    )
+                
+                results[error] = scenario_results  # 保存结果
             
         self.results = results
         return results
@@ -164,9 +214,12 @@ class ScenarioAnalyzer:
         discharge = LpVariable.dicts("Discharge", range(time_points), 0, battery['max_power'])
         is_charging = LpVariable.dicts("IsCharging", range(time_points), cat="Binary")
         
+        # 生成时间序列
+        time = np.linspace(0, 24, time_points)
+        
         # 目标函数
         prob += lpSum([(scenario['load'][i] - scenario['pv'][i] - discharge[i] + charge[i]) * 
-                      get_electricity_price(i) * 0.25 for i in range(time_points)])
+                      get_electricity_price(time[i]) * 0.25 for i in range(time_points)])
         
         # 约束条件
         for i in range(time_points):
@@ -181,7 +234,7 @@ class ScenarioAnalyzer:
             
             # 功率平衡约束
             prob += scenario['load'][i] - scenario['pv'][i] - discharge[i] + charge[i] >= 30
-            prob += scenario['load'][i] - scenario['pv'][i] - discharge[i] + charge[i] <= 700
+            prob += scenario['load'][i] - scenario['pv'][i] - discharge[i] + charge[i] <= 1000
             
             if i > 0:
                 # SOC范围约束
@@ -224,98 +277,187 @@ class ScenarioAnalyzer:
             'total_cost': value(prob.objective),  # 预测成本
             'soc_values': [value(soc[i]) for i in range(time_points)],  # SOC值
             'charge_power': [value(charge[i]) for i in range(time_points)],  # 充电功率
-            'discharge_power': [value(discharge[i]) for i in range(time_points)]  # 放电功率
+            'discharge_power': [value(discharge[i]) for i in range(time_points)],  # 放电功率
+            'predicted_load': scenario['load']  # 预测负荷
         }
 
-    def save_results(self, filename='results/scenario_analysis.h5'):
+    def save_results(self, type='accuracy'):
         """
         将分析结果保存到HDF5文件
         
         参数：
         filename：保存结果的文件路径
         """
-        with h5py.File(filename, 'w') as f:
-            # 保存真实成本
-            f.attrs['true_cost'] = self.true_cost
-            
-            for accuracy, results in self.results.items():
-                # 为每个准确度水平创建组
-                grp = f.create_group(f"accuracy_{int(accuracy*100)}")
-                # 保存各项结果数据
-                grp.create_dataset('total_costs', data=[r['total_cost'] for r in results])
-                grp.create_dataset('real_costs', data=[r['real_cost'] for r in results])
-                grp.create_dataset('soc_values', data=[r['soc_values'] for r in results])
-                grp.create_dataset('charge_power', data=[r['charge_power'] for r in results])
-                grp.create_dataset('discharge_power', data=[r['discharge_power'] for r in results])
-                # 计算并保存成本差异
-                cost_differences = [r['real_cost'] - self.true_cost for r in results]
-                grp.create_dataset('cost_differences', data=cost_differences)
+        if type == 'accuracy':
+            filename='results/scenario_analysis/accuracy_based_scenario_analysis.h5'
+            with h5py.File(filename, 'w') as f:
+                # 保存全局真实数据
+                f.attrs['true_cost'] = self.true_cost
+                f.create_dataset('true_load', data=self.true_load)
+                f.create_dataset('true_pv', data=self.true_pv)
+                f.create_dataset('true_net_load', data=self.true_net_load)
+                
+                for accuracy, results in self.results.items():
+                    # 为每个准确度水平创建组
+                    grp = f.create_group(f"accuracy_{int(accuracy*100)}%")
+                    # 保存各项结果数据
+                    grp.create_dataset('total_costs', data=[r['total_cost'] for r in results])
+                    grp.create_dataset('real_costs', data=[r['real_cost'] for r in results])
+                    grp.create_dataset('soc_values', data=[r['soc_values'] for r in results])
+                    grp.create_dataset('charge_power', data=[r['charge_power'] for r in results])
+                    grp.create_dataset('discharge_power', data=[r['discharge_power'] for r in results])
+                    grp.create_dataset('predicted_load', data=[r['predicted_load'] for r in results])
+                    grp.create_dataset('true_net_load', data=[r['true_load'] for r in results])
+                    # 计算并保存成本差异
+                    cost_differences = [r['real_cost'] - self.true_cost for r in results]
+                    grp.create_dataset('cost_differences', data=cost_differences)
+        elif type == 'error':
+            filename='results/scenario_analysis/error_based_scenario_analysis.h5'
+            with h5py.File(filename, 'w') as f:
+                # 保存全局真实数据
+                f.attrs['true_cost'] = self.true_cost
+                f.create_dataset('true_load', data=self.true_load)
+                f.create_dataset('true_pv', data=self.true_pv)
+                f.create_dataset('true_net_load', data=self.true_net_load)
+                
+                for error, results in self.results.items():
+                    # 为每个准确度水平创建组
+                    grp = f.create_group(f"error_{error}kW")
+                    # 保存各项结果数据
+                    grp.create_dataset('total_costs', data=[r['total_cost'] for r in results])
+                    grp.create_dataset('real_costs', data=[r['real_cost'] for r in results])
+                    grp.create_dataset('soc_values', data=[r['soc_values'] for r in results])
+                    grp.create_dataset('charge_power', data=[r['charge_power'] for r in results])
+                    grp.create_dataset('discharge_power', data=[r['discharge_power'] for r in results])
+                    grp.create_dataset('predicted_load', data=[r['predicted_load'] for r in results])
+                    grp.create_dataset('true_net_load', data=[r['true_load'] for r in results])
+                    # 计算并保存成本差异
+                    cost_differences = [r['real_cost'] - self.true_cost for r in results]
+                    grp.create_dataset('cost_differences', data=cost_differences)
 
-    def plot_results(self):
+    def plot_results(self, type = 'accuracy'):
         """
         生成场景分析结果的可视化图表
         """
-        import matplotlib.pyplot as plt  # 导入matplotlib用于绘图
-        import seaborn as sns  # 导入seaborn用于美化图表
-        
+        time_points = self.params['time_points']  # 获取时间点数
+        time = np.linspace(0, 24, time_points)  # 生成时间序列，从0到24小时
         # 设置图表布局
         plt.figure(figsize=(18, 12))
         sns.set_style('whitegrid')
         
-        # 绘制成本分布图
-        plt.subplot(2, 2, 1)
-        for accuracy, results in self.results.items():
-            costs = [r['real_cost'] for r in results]
-            sns.kdeplot(costs, label=f'{int(accuracy*100)}% Accuracy')
-        # 添加真实成本参考线
-        plt.axvline(self.true_cost, color='red', linestyle='--', label='True Cost')
-        plt.title('Real Cost Distribution')
-        plt.xlabel('Real Cost')
-        plt.ylabel('Density')
-        plt.legend()
-        
-        # 绘制成本差异分布图
-        plt.subplot(2, 2, 2)
-        for accuracy, results in self.results.items():
-            cost_diffs = [r['real_cost'] - self.true_cost for r in results]
-            sns.kdeplot(cost_diffs, label=f'{int(accuracy*100)}% Accuracy')
-        plt.axvline(0, color='gray', linestyle=':', label='Zero Difference')
-        plt.title('Cost Difference Distribution')
-        plt.xlabel('Cost Difference')
-        plt.ylabel('Density')
-        plt.legend()
-        
-        # 绘制SOC统计图
-        plt.subplot(2, 2, 3)
-        soc_stats = []
-        for accuracy, results in self.results.items():
-            soc_values = np.array([r['soc_values'] for r in results])
-            soc_stats.append({
-                'accuracy': accuracy,
-                'mean': np.mean(soc_values),
-                'std': np.std(soc_values)
-            })
-        soc_stats = pd.DataFrame(soc_stats)
-        sns.barplot(data=soc_stats, x='accuracy', y='mean', yerr=soc_stats['std'])
-        plt.title('Average SOC at Different Accuracy Levels')
-        plt.xlabel('Accuracy Level')
-        plt.ylabel('Average SOC (%)')
-        
-        # 绘制充放电模式图
-        plt.subplot(2, 2, 4)
-        for accuracy, results in self.results.items():
-            charge_power = np.mean([r['charge_power'] for r in results], axis=0)
-            discharge_power = np.mean([r['discharge_power'] for r in results], axis=0)
-            plt.plot(charge_power, label=f'{int(accuracy*100)}% Charge')
-            plt.plot(discharge_power, '--', label=f'{int(accuracy*100)}% Discharge')
-        plt.title('Average Charging/Discharging Pattern')
-        plt.xlabel('Time')
-        plt.ylabel('Power (kW)')
-        plt.legend()
-        
-        plt.tight_layout()  # 调整布局
-        plt.savefig('results/scenario_analysis.png', dpi=300)  # 保存图表
-        plt.close()  # 关闭图表
+        if type == 'accuracy':
+            # 绘制成本分布图
+            plt.subplot(2, 2, 1)
+            for accuracy, results in self.results.items():
+                costs = [r['real_cost'] for r in results]
+                sns.kdeplot(costs, label=f'{int(accuracy*100)}% Accuracy')
+            # 添加真实成本参考线
+            plt.axvline(self.true_cost, color='red', linestyle='--', label='True Cost')
+            plt.title('Real Cost Distribution')
+            plt.xlabel('Real Cost')
+            plt.ylabel('Density')
+            plt.legend()
+            
+            #绘制实际净负荷统计图
+            plt.subplot(2, 2, 2)
+            for accuracy, results in self.results.items():
+                True_net_load = np.mean([r['true_load'] for r in results], axis=0)
+                plt.plot(time, True_net_load, label=f'{accuracy}% Accuracy Load')
+            plt.plot(time, self.true_net_load, label='Optimal Load', linestyle='--')
+            plt.title('Average Ture Load Pattern')
+            plt.xlabel('Time')
+            plt.ylabel('Power (kW)')
+            plt.legend()
+            
+            # 绘制SOC统计图
+            plt.subplot(2, 2, 3)
+            soc_stats = []
+            for accuracy, results in self.results.items():
+                soc_values = np.array([r['soc_values'] for r in results])
+                soc_stats.append({
+                    'accuracy': accuracy,
+                    'mean': np.mean(soc_values),
+                    'std': np.std(soc_values)
+                })
+            soc_stats = pd.DataFrame(soc_stats)
+            sns.barplot(data=soc_stats, x='accuracy', y='mean', yerr=soc_stats['std'])
+            plt.title('Average SOC at Different Accuracy Levels')
+            plt.xlabel('Accuracy Level')
+            plt.ylabel('Average SOC (%)')
+            
+            # 绘制充放电模式图
+            plt.subplot(2, 2, 4)
+            for accuracy, results in self.results.items():
+                charge_power = np.mean([r['charge_power'] for r in results], axis=0)
+                discharge_power = np.mean([r['discharge_power'] for r in results], axis=0)
+                battery_power = charge_power - discharge_power 
+                plt.plot(time, battery_power, label=f'{accuracy}% Power')
+            plt.plot(time, self.true_battery_power, label = 'Optimal Power', linestyle='--')
+            plt.title('Average Battery Charging/Discharging Pattern')
+            plt.xlabel('Time')
+            plt.ylabel('Power (kW)')
+            plt.legend()
+            
+            plt.tight_layout()  # 调整布局
+            plt.savefig('results/scenario_analysis/accurancy_scenario_analysis.png', dpi=300)  # 保存图表
+            plt.close()  # 关闭图表
+
+        elif type == 'error':
+            # 绘制成本分布图
+            plt.subplot(2, 2, 1)
+            for error, results in self.results.items():
+                costs = [r['real_cost'] for r in results]
+                sns.kdeplot(costs, label=f'{error}KW Error')
+            # 添加真实成本参考线
+            plt.axvline(self.true_cost, color='red', linestyle='--', label='True Cost')
+            plt.title('Real Cost Distribution')
+            plt.xlabel('Real Cost')
+            plt.ylabel('Density')
+            plt.legend()
+
+            #绘制实际净负荷统计图
+            plt.subplot(2, 2, 2)
+            for error, results in self.results.items():
+                True_net_load = np.mean([r['true_load'] for r in results], axis=0)
+                plt.plot(time, True_net_load, label=f'{error}kW Error Load')
+            plt.plot(time, self.true_net_load, label='Optimal Load', linestyle='--')
+            plt.title('Average Ture Load Pattern')
+            plt.xlabel('Time')
+            plt.ylabel('Power (kW)')
+            plt.legend()
+            
+            # 绘制SOC统计图
+            plt.subplot(2, 2, 3)
+            soc_stats = []
+            for error, results in self.results.items():
+                soc_values = np.array([r['soc_values'] for r in results])
+                soc_stats.append({
+                    'error': error,
+                    'mean': np.mean(soc_values),
+                    'std': np.std(soc_values)
+                })
+            soc_stats = pd.DataFrame(soc_stats)
+            sns.barplot(data=soc_stats, x='error', y='mean', yerr=soc_stats['std'])
+            plt.title('Average SOC at Different Accuracy Levels')
+            plt.xlabel('Accuracy Level')
+            plt.ylabel('Average SOC (%)')
+            
+            # 绘制充放电模式图
+            plt.subplot(2, 2, 4)
+            for error, results in self.results.items():
+                charge_power = np.mean([r['charge_power'] for r in results], axis=0)
+                discharge_power = np.mean([r['discharge_power'] for r in results], axis=0)
+                battery_power = charge_power - discharge_power 
+                plt.plot(time, battery_power, label=f'{error}KW Error Power')
+            plt.plot(time, self.true_battery_power, label = 'Optimal Power', linestyle='--')
+            plt.title('Average Battery Charging/Discharging Pattern')
+            plt.xlabel('Time')
+            plt.ylabel('Power (kW)')
+            plt.legend()
+            
+            plt.tight_layout()  # 调整布局
+            plt.savefig('results/scenario_analysis/error_based_scenario_analysis.png', dpi=300)  # 保存图表
+            plt.close()  # 关闭图表
 
 if __name__ == "__main__":
     import argparse
@@ -327,14 +469,21 @@ if __name__ == "__main__":
     # 创建命令行参数解析器
     parser = argparse.ArgumentParser()
     parser.add_argument('--scenario', action='store_true', help='Run scenario analysis')
+    # parser.add_argument('--accuracy', type=float, help='Run accuracy analysis')
+    parser.add_argument('--error', action='store_true', help='Run error based analysis')
     args = parser.parse_args()
     
     analyzer = ScenarioAnalyzer(parameters)  # 创建场景分析器
     
     if args.scenario:  # 如果指定了场景分析模式
-        analyzer.run_analysis()  # 运行场景分析
-        analyzer.save_results()  # 保存分析结果
-        analyzer.plot_results()  # 生成可视化图表
+        if args.error:
+            analyzer.run_analysis(type='error')
+            analyzer.save_results(type='error')  # 保存分析结果
+            analyzer.plot_results(type='error')  # 生成可视化图表
+        else:
+            analyzer.run_analysis()  # 运行场景分析
+            analyzer.save_results()  # 保存分析结果
+            analyzer.plot_results()  # 生成可视化图表
     else:  # 否则运行单场景优化
         time_points = parameters['time_points']
         time = np.linspace(0, 24, time_points)

@@ -3,7 +3,7 @@
   "load_csv": 1,
   "pv_csv": 1,
   "battery": {
-    "capacity": 2800,
+    "capacity": 3800,
     "max_power": 1000,
     "initial_soc": 0.55
   },
