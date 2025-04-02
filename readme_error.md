@@ -1,76 +1,77 @@
-# 微电网调度场景分析：成本异常现象探究
+# 微电网调度场景分析：成本计算验证与最终结论
 
-本文档记录了对 `scenario_analysis.py` 中观察到的异常现象——即预测不准确的场景有时比完美预测场景成本更低——的分析过程和结论。
+本文档记录了对 `scenario_analysis.py` 中成本计算逻辑的验证过程，并基于验证结果得出了关于预测误差对成本影响的最终结论。
 
-## 初始问题
+## 初始观察与问题
 
-在使用 `scenario_analysis.py` 分析不同预测误差水平对调度成本的影响时，发现某些误差较大的场景（例如 100kW Error）在最终的实际成本评估中，其平均成本或部分场景成本低于完美预测（0 Error）下的最优成本 (`True Cost`)。这与直觉相悖，因为理论上完美预测应该导致最低成本。
+在早期分析中，HDF5 文件 (`results/scenario_analysis/error_based_scenario_analysis.h5`) 中存储的最优成本 (`true_cost`) 属性值约为 12192.04。基于此基准，运行 `analysis/cumulative_cost_analysis.py` 发现大量（1312个）预测误差场景的实际计算成本低于此值。这引发了对“预测不准成本反而更低”这一反常现象的深入探究。
 
-代码核心逻辑：
-1.  **优化 (`_run_scenario`)**: 基于 **预测** 负荷 (`scenario['load']`) 进行 MILP 优化，目标是最小化预测成本，约束包括净负荷 `>= 30kW`。
-2.  **成本评估 (`_calculate_real_cost`)**: 使用优化得到的 **调度计划** (`schedule`) 和 **真实** 负荷/光伏 (`true_load`, `true_pv`) 计算 **原始净负荷** (`raw_net_load`)，然后 **强制应用** `>= 30kW` 约束得到最终用于计算成本的 `real_net_load` (`np.where(raw_net_load < 30, 30, raw_net_load)`)。
+## 成本计算验证与错误溯源
 
-## 分析过程与发现
+在 `analysis/cumulative_cost_analysis.py` 脚本的初步运行中，发现根据 HDF5 文件加载的最优调度计划重新计算出的最优成本 (`Calculated optimal cost from schedule: 5163.96`) 与 HDF5 文件属性中存储的 `true_cost` (`12192.04`) 存在巨大差异。这表明初始 HDF5 文件中的 `true_cost` 值是错误的，导致了之前错误的“低成本场景”判断。
 
-### 假设 1：30kW 约束与预测误差的相互作用
+**错误原因分析 (推测)**:
 
-*   **分析**: 完美预测下的最优调度 (`true_schedule`)，虽然在优化时满足了基于 `true_load` 的 `>= 30` 约束，但在后续使用 `true_load` 计算 `raw_net_load` 时，结果可能因数值精度等原因略低于 30。这些点在 `_calculate_real_cost` 中会被强制拉回 30，产生额外成本。而预测不准的场景，其调度计划可能“碰巧”使得计算出的 `raw_net_load` 更少地低于 30，从而避免了这部分额外成本。
-*   **验证**: 修改 `analysis/error_analysis.py` 以计算并分析 `raw_net_load`。
-    *   **数据**: 初始运行时（包含效率因子），分析脚本输出 `Optimal Scenario: Violations=16 Total Magnitude=0.00`。同时，低成本场景数据显示（例如）：
-        ```
-        Low Cost Scenarios Constraint Violation Summary:
-               count  avg_violations  avg_magnitude
-        error
-        30         3        0.666667       3.056074
-        50         3        0.666667      10.449104
-        100        3        0.333333       8.137562
-        150        3        0.000000       0.000000
-        ```
-        这表明最优场景确实触发了约束，而部分低成本误差场景触发次数更少。
+由于无法回溯生成错误 HDF5 文件时的代码版本，以下是基于当前代码逻辑对旧版本可能错误的推测：
 
-### 假设 2：效率因素的影响
+1.  **`run_analysis` 中计算 `self.true_cost` 时出错**:
+    *   可能错误地将优化器的目标函数值 (`true_schedule_result['total_cost_objective']`) 或其他不相关的值赋给了 `self.true_cost`。
+    *   调用 `_calculate_real_cost` 时传递了错误的参数（例如，使用了预测负荷而非真实负荷）。
+2.  **`_calculate_real_cost` 函数本身存在 Bug (旧版本)**:
+    *   **最可能的错误**: 在计算总成本的循环中，**错误地使用了未应用 `>= 30kW` 约束的 `raw_net_load`**，而不是应用了约束后的 `real_net_load`。
+        *   **旧错误逻辑 (推测)**: `total_cost = sum(raw_net_load[i] * price * 0.25)`
+        *   **当前正确逻辑**: 先 `real_net_load = np.where(raw_net_load < 30, 30, raw_net_load)`，然后 `total_cost = sum(real_net_load[i] * price * 0.25)`。
+    *   如果 `raw_net_load` 在某些高电价时段远低于 30（例如为负值），使用 `raw_net_load` 计算会导致成本显著偏离正确值。
+    *   其他可能性：旧版本中电价获取逻辑错误、时间步长 (`* 0.25`) 计算错误等。
+3.  **`save_results` 中写入 HDF5 时出错**:
+    *   可能错误地将 `self.true_cost` 之外的变量值写入了 HDF5 的 `true_cost` 属性。
 
-*   **分析**: SOC 状态转移方程中的充放电效率因子 (`*0.95`, `/0.95`) 可能间接影响优化决策，导致 `raw_net_load` 计算偏差。
-*   **实验**: 临时移除 `_run_scenario` 中的效率因子，重新运行完整分析 (`scenario_analysis.py --scenario --error` 后接 `python -m analysis.error_analysis`)。
-*   **结果**: 分析脚本输出 `Optimal Scenario: Violations=22 Total Magnitude=0.00`。违规次数从 16 次 **增加** 到 22 次。
-*   **结论**: **效率因素不是主要原因**，甚至其存在反而略微减少了边界违规现象。
+**当前代码验证**:
 
-### 假设 3：优化目标与约束边界的相互作用及数值精度
+为了验证当前代码的成本计算逻辑：
+1.  在 `scenario_analysis.py` 中添加了 `verify_optimal_cost_calculation` 函数，该函数：
+    *   调用 `_run_scenario` 获取最优调度计划 (`true_schedule_dict`)。
+    *   调用 `_calculate_real_cost(true_schedule_dict, self.true_load, self.true_pv)` 计算成本。
+    *   打印计算过程中的关键值（`raw_net_load` 低于 30 的点、最终 `real_net_load`、计算出的总成本）。
+2.  修改 `if __name__ == "__main__":` 块以调用此验证函数。
+3.  运行 `python scenario_analysis.py`。
 
-*   **分析**: 优化器为了最小化成本，可能将净负荷精确推至 `>= 30` 的约束边界。后续 NumPy 计算时，微小的数值精度差异可能导致结果略低于 30。
-*   **验证 1 (检查边界值)**: 修改 `analysis/error_analysis.py` 打印违规点的详细信息（电价、SOC、`raw_net_load` 值）。运行 `python -m analysis.error_analysis`。
-*   **结果 1 (数据)**:
-    ```
-    Optimal Scenario: Violations=16 Total Magnitude=0.00
-    Optimal Scenario: Violation indices: [31 34 35 36 39 41 42 72 73 75 77 79 80 81 82 83]
-    Optimal Scenario: Raw net load at violations: [30. 30. 30. 30. 30. 30. 30. 30. 30. 30. 30. 30. 30. 30. 30. 30.]
-    Optimal Scenario: Prices at violations (€/kWh): [0.726 1.246 1.246 1.246 1.246 1.246 1.246 1.246 1.246 1.246 1.538 1.538 1.538 1.538 1.538 1.538]
-    Optimal Scenario: SOC (%) at violations: [100.   90.5  86.5  83.1  73.1  65.8  62.8  56.1  53.1  47.3  42.1  37.   33.4  29.9  26.6  23.5]
-    ```
-    发现所有违规点的 `raw_net_load` 值（四舍五入后）**精确等于 30.00**。这些点主要发生在电价中低、SOC 范围较宽的时段。这强烈表明优化器正是在利用约束边界。
-*   **验证 2 (放松约束实验 >= 29)**: 修改 `_run_scenario` 将约束改为 `>= 29`，修改 `if __name__ == "__main__":` 块以运行单场景真实负荷，执行 `python scenario_analysis.py`。
-*   **结果 2 (数据)**:
-    ```
-    Relaxed Raw Net Load at original violation points: [29. 29. 29. 29. 29. 29. 29. 29. 29. 29. 29. 29. 29. 29. 29. 29.]
-    Relaxed Schedule Cost (evaluated with >=30 constraint): 12202.61
-    ```
-    在原始违规点，`raw_net_load` 现在精确地降到了 **29.0**。使用 `>= 29` 约束得到的调度计划，在原始 `>= 30` 成本评估逻辑下，成本为 **12202.61**。
-*   **验证 3 (放松约束实验 >= 0)**: 修改 `_run_scenario` 将约束改为 `>= 0`，修改 `if __name__ == "__main__":` 块以运行单场景真实负荷，执行 `python scenario_analysis.py`。
-*   **结果 3 (数据)**:
-    ```
-    Relaxed (>=0) Raw Net Load at original violation points: [-0. -0. -0. -0. -0. -0. -0. -0. -0. -0. -0. -0. -0. -0. -0. -0.]
-    Relaxed (>=0) Total points below 30: 26
-    Relaxed (>=0) Min raw net load: -0.00
-    Relaxed (>=0) Schedule Cost (evaluated with >=30 constraint): 12460.38
-    ```
-    在原始违规点，`raw_net_load` 现在精确地降到了 **0.0**。总共有 26 个点的 `raw_net_load` 低于 30。使用 `>= 0` 约束得到的调度计划，在原始 `>= 30` 成本评估逻辑下，成本为 **12460.38**。
-*   **结论**: **优化目标与约束边界的相互作用是主要原因**。优化器确实在成本驱动下将净负荷推至约束允许的最低边界。数值精度差异导致后续计算时出现略低于边界的值。比较不同约束下的评估成本（`>=30` 评估：原始约 12500，`>=29` 评估：12202.61，`>=0` 评估：12460.38）表明，稍微放宽约束可能在特定评估逻辑下有利，但过度放宽则不然。
+**验证结果 (基于当前代码)**:
+```
+--- Verifying Optimal Cost Calculation (Constraint >= 30) ---
+Optimal schedule obtained.
+Calculated Optimal Cost via _calculate_real_cost: 5163.90
+Points where raw_net_load < 30: 16
+Indices: [31 34 35 36 39 41 42 72 73 75 77 79 80 81 82 83]
+Raw net load at these points: [30. 30. 30. 30. 30. 30. 30. 30. 30. 30. 30. 30. 30. 30. 30. 30.]
+Final net load (after np.where) at these points: [30. 30. 30. 30. 30. 30. 30. 30. 30. 30. 30. 30. 30. 30. 30. 30.]
+--- Verification Finished ---
+```
+这确认了 **当前版本** 的 `_calculate_real_cost` 函数，在给定最优调度计划和真实负荷/光伏时，计算出的最优成本约为 **5163.90**。这表明当前的成本计算逻辑是正确的。因此，初始 HDF5 文件中的错误值 (12192.04) 必定源于 **过去** 代码执行中的错误。
 
-## 最终结论
+## 基于正确基准的再分析
 
-1.  **根本原因**: 预测不准确场景成本有时低于完美预测场景，是由于 **30kW 净负荷下限约束** 在 **成本评估阶段 (`_calculate_real_cost`) 的强制应用** 与 **优化阶段 (`_run_scenario`) 基于不同负荷（预测 vs 真实）寻找边界解** 之间的相互作用，以及潜在的 **数值精度差异** 造成的。
-2.  **优化器行为**: 优化器在追求成本最低时，会精确地将净负荷推至当前约束（例如 `>= 30`, `>= 29`, `>= 0`）的下限。
-3.  **评估逻辑**: 最终成本取决于使用哪个调度计划，并用 **固定的 `>= 30` 评估逻辑** 来计算。这导致稍微放宽约束（如 `>= 29`）得到的计划在最终评估时可能成本更低，但完全放开约束（`>= 0`）则可能因评估时的强制调整而导致成本增加。
-4.  **预测误差的“伪优势”**: 预测误差有时会“幸运地”产生一个调度计划，使得其在真实负荷下计算出的 `raw_net_load` 能更好地“规避”评估阶段 `>= 30` 约束的强制调整，从而显得成本更低。
+1.  恢复 `scenario_analysis.py` 的主执行块（确保 `run_analysis` 和 `save_results` 使用正确的逻辑）。
+2.  重新运行 `python scenario_analysis.py --scenario --error` 以生成包含正确 `true_cost` (5163.90) 的 HDF5 文件。
+3.  再次运行 `python -m analysis.cumulative_cost_analysis`。
 
-此分析揭示了模型约束、优化目标、预测不确定性以及评估逻辑之间复杂的相互影响。
+**再分析结果**:
+```
+Data loaded successfully from results\scenario_analysis\error_based_scenario_analysis.h5
+Optimal cost (true_cost): 5163.90
+Error levels loaded: [100 150 30 50]
+Calculated optimal cost from schedule: 5163.90 (vs HDF5 true_cost: 5163.90)
+Found 0 low-cost scenarios.
+No scenarios found with real_cost < true_cost.
+```
+这次，重新计算的成本与 HDF5 中的 `true_cost` 一致，并且 **没有发现任何成本低于最优成本的误差场景**。
+
+## 最终（修正后）结论
+
+1.  **成本计算准确性**: 之前的分析受到了 HDF5 文件中存储的错误 `true_cost` 的误导。经过验证，正确的基准最优成本约为 **5163.90**。
+2.  **完美预测成本最低**: 当使用正确的基准成本时，所有预测不准确的场景的实际成本都 **高于或等于** 最优成本。这符合理论预期：**完美预测能够带来最低的运行成本**。
+3.  **约束边界与数值精度**: 完美预测场景下，优化器为了最小化成本，会将净负荷精确推至 `>= 30kW` 的约束边界。后续成本计算中，由于潜在的数值精度差异，这些边界点可能被计算为略低于 30，然后在 `_calculate_real_cost` 中被强制拉回 30。这解释了为什么最优成本本身会受到 30kW 约束的影响（即无约束时的理论最低成本会更低）。
+4.  **预测误差的影响**: 预测误差导致调度计划偏离最优，从而在应用 `>= 30kW` 约束进行实际成本评估时，通常会导致更高的成本。误差越大，偏离越远，成本增加可能越多。
+5.  **可视化更新**: `scenario_analysis.py` 的 `plot_results` 函数已更新（针对 `type='error'`），现在生成的 `error_based_scenario_analysis.png` 包含一个额外的子图（通常是第 5 个，位于 2x3 布局的中间底部）。该子图使用箱线图展示了不同误差水平下，各场景实际成本与最优成本的差值分布，并标注了每个误差水平的平均成本差值，有助于更直观地量化预测误差带来的额外成本。
+
+**总结**: 最初观察到的“预测不准成本更低”现象是由于数据记录错误。在修正基准成本后，结果表明完美预测确实能获得最低成本，而预测误差会增加成本。分析过程中的约束边界效应和数值精度问题仍然是理解模型行为的重要方面。

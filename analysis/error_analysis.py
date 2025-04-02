@@ -65,7 +65,7 @@ def load_error_data(filepath):
                 data['groups'][error] = {
                     'real_costs': grp['real_costs'][:],
                     'predicted_load': grp['predicted_load'][:],
-                    'true_net_load': grp['true_net_load'][:],
+                    'real_net_load': grp['real_net_load'][:], # Corrected key from 'true_net_load'
                     'soc_values': grp['soc_values'][:],
                     'charge_power': grp['charge_power'][:],
                     'discharge_power': grp['discharge_power'][:]
@@ -155,10 +155,10 @@ def select_low_cost_scenarios(data, num_samples=3):
     try:
         for error in data['groups']:
             # 验证必要字段存在
-            required_keys = ['real_costs', 'predicted_load', 'true_net_load']
+            required_keys = ['real_costs', 'predicted_load', 'real_net_load'] # Corrected key
             if not all(k in data['groups'][error] for k in required_keys):
                 raise KeyError(f"Missing required keys in error group {error}")
-                
+
             costs = data['groups'][error]['real_costs']
             true_cost = data['true_cost']
             
@@ -181,10 +181,10 @@ def select_low_cost_scenarios(data, num_samples=3):
             # 存储数据并验证维度
             selected[error] = {
                 'predicted_load': data['groups'][error]['predicted_load'][selected_indices],
-                'true_net_load': data['groups'][error]['true_net_load'][selected_indices],
+                'real_net_load': data['groups'][error]['real_net_load'][selected_indices], # Corrected key
                 'scenario_ids': selected_indices
             }
-            # 验证数据形状
+            # 验证数据形状 (验证 'predicted_load' 即可，因为它们应具有相同的维度)
             if selected[error]['predicted_load'].shape[1] != len(data['true_load']):
                 raise ValueError("Predicted load dimension mismatch")
                 
@@ -224,8 +224,8 @@ def plot_selected_scenarios(data, selected, save_dir, time_points=96):
                 try:
                     # 检查数据有效性
                     pred_load = scenarios['predicted_load'][col_idx]
-                    net_load = scenarios['true_net_load'][col_idx]
-                    
+                    net_load = scenarios['real_net_load'][col_idx] # Corrected key
+
                     if np.isnan(pred_load).any() or np.isnan(net_load).any():
                         raise ValueError("NaN values detected in load data")
                         
