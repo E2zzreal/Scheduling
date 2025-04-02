@@ -140,6 +140,7 @@ class ScenarioAnalyzer:
             'load': self.true_load,
             'pv': self.true_pv
         })
+        self.true_schedule = true_schedule # <--- 新增: 保存最优调度结果
         self.true_battery_power = np.array(true_schedule['charge_power']) - np.array(true_schedule['discharge_power'])
         self.true_net_load, self.true_cost = self._calculate_real_cost(true_schedule, self.true_load, self.true_pv)
         if type == 'accuracy':
@@ -232,8 +233,8 @@ class ScenarioAnalyzer:
                 # SOC状态转移方程
                 prob += soc[i] == soc[i-1] + charge[i]*0.25*0.95 - discharge[i]*0.25/0.95
             
-            # 功率平衡约束
-            prob += scenario['load'][i] - scenario['pv'][i] - discharge[i] + charge[i] >= 30
+            # 功率平衡约束 (临时修改：将下限改为 0)
+            prob += scenario['load'][i] - scenario['pv'][i] - discharge[i] + charge[i] >= 0
             prob += scenario['load'][i] - scenario['pv'][i] - discharge[i] + charge[i] <= 1000
             
             if i > 0:
@@ -296,7 +297,19 @@ class ScenarioAnalyzer:
                 f.create_dataset('true_load', data=self.true_load)
                 f.create_dataset('true_pv', data=self.true_pv)
                 f.create_dataset('true_net_load', data=self.true_net_load)
-                
+                # 新增：保存最优充放电功率和 SOC
+                if hasattr(self, 'true_schedule'):
+                     f.create_dataset('true_charge_power', data=self.true_schedule['charge_power'])
+                     f.create_dataset('true_discharge_power', data=self.true_schedule['discharge_power'])
+                     # --- 同时保存最优 SOC ---
+                     if 'soc_values' in self.true_schedule:
+                         f.create_dataset('true_soc_values', data=self.true_schedule['soc_values'])
+                     else:
+                         print("Warning: Optimal SOC values not found in true_schedule.")
+                     # --- 保存 SOC 结束 ---
+                else:
+                     print("Warning: True schedule data not available for saving in accuracy mode.")
+
                 for accuracy, results in self.results.items():
                     # 为每个准确度水平创建组
                     grp = f.create_group(f"accuracy_{int(accuracy*100)}%")
@@ -319,7 +332,19 @@ class ScenarioAnalyzer:
                 f.create_dataset('true_load', data=self.true_load)
                 f.create_dataset('true_pv', data=self.true_pv)
                 f.create_dataset('true_net_load', data=self.true_net_load)
-                
+                # 新增：保存最优充放电功率和 SOC
+                if hasattr(self, 'true_schedule'):
+                     f.create_dataset('true_charge_power', data=self.true_schedule['charge_power'])
+                     f.create_dataset('true_discharge_power', data=self.true_schedule['discharge_power'])
+                     # --- 同时保存最优 SOC ---
+                     if 'soc_values' in self.true_schedule:
+                         f.create_dataset('true_soc_values', data=self.true_schedule['soc_values'])
+                     else:
+                         print("Warning: Optimal SOC values not found in true_schedule.")
+                     # --- 保存 SOC 结束 ---
+                else:
+                     print("Warning: True schedule data not available for saving in error mode.")
+
                 for error, results in self.results.items():
                     # 为每个准确度水平创建组
                     grp = f.create_group(f"error_{error}kW")
@@ -484,10 +509,50 @@ if __name__ == "__main__":
             analyzer.run_analysis()  # 运行场景分析
             analyzer.save_results()  # 保存分析结果
             analyzer.plot_results()  # 生成可视化图表
-    else:  # 否则运行单场景优化
-        time_points = parameters['time_points']
-        time = np.linspace(0, 24, time_points)
-        load = generate_load_curve(time)
-        pv = generate_pv_curve(time)
-        scenario = {'load': load, 'pv': pv}
-        analyzer._run_scenario(scenario, single_scenario=True)
+    else:  # 否则运行单场景优化 (修改为运行真实负荷场景，约束 >= 0)
+        print("Running single scenario optimization with true load and pv (relaxed constraint >= 0)...")
+        # 使用 analyzer 实例中已有的 true_load 和 true_pv
+        scenario = {'load': analyzer.true_load, 'pv': analyzer.true_pv}
+        # 调用 _run_scenario 并获取结果，设置 single_scenario=True 获取详细输出
+        relaxed_schedule_result_0 = analyzer._run_scenario(scenario, single_scenario=True)
+
+        # --- 在这里添加分析新结果的代码 ---
+        print("\n--- Analyzing Relaxed Constraint (>=0) Results ---")
+        # 获取放松约束后的调度计划
+        schedule_relaxed_0 = relaxed_schedule_result_0['schedule']
+
+        # 计算新计划下的 raw_net_load_relaxed
+        try:
+            # 尝试从 analysis 模块导入，如果失败则打印错误
+            try:
+                from analysis.error_analysis import calculate_raw_net_load
+            except ImportError:
+                 # 如果直接运行此脚本可能找不到 analysis 模块，尝试相对导入或调整路径
+                 # 作为备选，可以直接复制 calculate_raw_net_load 函数到这里，但不推荐
+                 print("Warning: Could not import calculate_raw_net_load from analysis.error_analysis.")
+                 # 定义一个临时的本地版本作为后备
+                 def calculate_raw_net_load(true_load, true_pv, charge_power, discharge_power):
+                     return np.array(true_load) - np.array(true_pv) - np.array(discharge_power) + np.array(charge_power)
+
+            raw_net_load_relaxed_0 = calculate_raw_net_load(
+                analyzer.true_load, analyzer.true_pv,
+                np.array(schedule_relaxed_0['charge_power']), np.array(schedule_relaxed_0['discharge_power'])
+            )
+            # 之前定位的违规点索引 (原始 >= 30 约束下的)
+            original_violation_indices = [31, 34, 35, 36, 39, 41, 42, 72, 73, 75, 77, 79, 80, 81, 82, 83]
+            print(f"Relaxed (>=0) Raw Net Load at original violation points: {np.round(raw_net_load_relaxed_0[original_violation_indices], 2)}")
+            # 检查是否有新的低于 30 的点
+            new_violations = raw_net_load_relaxed_0 < 30
+            print(f"Relaxed (>=0) Total points below 30: {np.sum(new_violations)}")
+            if np.sum(new_violations) > 0:
+                 print(f"Relaxed (>=0) Min raw net load: {np.min(raw_net_load_relaxed_0):.2f}")
+
+
+            # 使用原始的 _calculate_real_cost 计算最终成本 (它仍然强制 >= 30)
+            _, cost_relaxed_0 = analyzer._calculate_real_cost(schedule_relaxed_0, analyzer.true_load, analyzer.true_pv)
+            print(f"Relaxed (>=0) Schedule Cost (evaluated with >=30 constraint): {cost_relaxed_0:.2f}")
+
+        except Exception as e:
+            print(f"Error during relaxed (>=0) analysis: {e}")
+
+        print("--- Relaxed Constraint (>=0) Analysis Finished ---")

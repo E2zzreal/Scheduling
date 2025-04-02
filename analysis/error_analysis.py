@@ -12,6 +12,24 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from pathlib import Path
 import pandas as pd
+# 新增导入，用于获取电价和加载参数
+from utils import get_electricity_price
+import json
+
+# --- 新增辅助函数 ---
+def calculate_raw_net_load(true_load, true_pv, charge_power, discharge_power):
+    """计算应用约束前的原始净负荷"""
+    # 确保输入是 numpy 数组
+    true_load = np.array(true_load)
+    true_pv = np.array(true_pv)
+    charge_power = np.array(charge_power)
+    discharge_power = np.array(discharge_power)
+    # 检查维度匹配
+    if not (true_load.shape == true_pv.shape == charge_power.shape == discharge_power.shape):
+        raise ValueError(f"Dimension mismatch in calculate_raw_net_load: "
+                         f"{true_load.shape}, {true_pv.shape}, {charge_power.shape}, {discharge_power.shape}")
+    return true_load - true_pv - discharge_power + charge_power
+# --- 辅助函数结束 ---
 
 def load_error_data(filepath):
     """加载error模式数据"""
@@ -23,7 +41,23 @@ def load_error_data(filepath):
             'true_net_load': f['true_net_load'][:],
             'groups': {}
         }
-        
+
+        # 尝试加载最优功率数据 (新增)
+        if 'true_charge_power' in f and 'true_discharge_power' in f:
+            data['true_charge_power'] = f['true_charge_power'][:]
+            data['true_discharge_power'] = f['true_discharge_power'][:]
+            print("Optimal charge/discharge power loaded from HDF5.")
+        else:
+            print("Warning: Optimal charge/discharge power not found in HDF5.")
+
+        # --- 新增：尝试加载最优 SOC 数据 ---
+        if 'true_soc_values' in f:
+            data['true_soc_values'] = f['true_soc_values'][:]
+            print("Optimal SOC values loaded from HDF5.")
+        else:
+            print("Warning: Optimal SOC values ('true_soc_values') not found in HDF5.")
+        # --- 加载 SOC 结束 ---
+
         for group_name in f:
             if group_name.startswith('error_'):
                 error = int(group_name.split('_')[1].replace('kW', ''))
@@ -225,6 +259,183 @@ def plot_selected_scenarios(data, selected, save_dir, time_points=96):
     finally:
         plt.close()
 
+# --- 新增分析函数 ---
+def analyze_constraint_interaction(data, selected_scenarios, save_dir, time_points=96):
+    """分析30kW约束的影响"""
+    analysis_results = {}
+    time = np.linspace(0, 24, time_points)
+    constraint_threshold = 30
+    output_path = Path(save_dir)
+
+    print("\n--- Starting Constraint Interaction Analysis ---")
+
+    # --- 处理最优场景 ---
+    optimal_analysis = {}
+    if 'true_charge_power' in data and 'true_discharge_power' in data:
+        try:
+            optimal_raw_net_load = calculate_raw_net_load(
+                data['true_load'], data['true_pv'],
+                data['true_charge_power'], data['true_discharge_power']
+            )
+            optimal_violations = optimal_raw_net_load < constraint_threshold
+            optimal_violation_count = np.sum(optimal_violations)
+            # 计算违规幅度时避免负值索引
+            violation_indices = np.where(optimal_violations)[0]
+            optimal_violation_magnitude = np.sum(np.maximum(0, constraint_threshold - optimal_raw_net_load[violation_indices]))
+
+            optimal_analysis = {
+                'raw_net_load': optimal_raw_net_load,
+                'violation_count': optimal_violation_count,
+                'violation_magnitude': optimal_violation_magnitude
+            }
+            print(f"Optimal Scenario: Violations={optimal_violation_count}, Total Magnitude={optimal_violation_magnitude:.2f}")
+            # --- 新增：打印违规点的详细信息 ---
+            if optimal_violation_count > 0:
+                violation_indices = np.where(optimal_violations)[0]
+                print(f"Optimal Scenario: Violation indices: {violation_indices}")
+                print(f"Optimal Scenario: Raw net load at violations: {np.round(optimal_raw_net_load[violation_indices], 2)}")
+
+                # --- 获取并打印电价和 SOC ---
+                try:
+                    # 加载参数以获取 time_points 和 battery capacity
+                    params = {}
+                    try:
+                        with open('config/parameters.json') as f:
+                            params = json.load(f)
+                    except FileNotFoundError:
+                         print("Warning: config/parameters.json not found. Using default time_points=96 and capacity=1000.")
+                    time_points = params.get('time_points', 96)
+                    battery_capacity = params.get('battery', {}).get('capacity', 1000) # 默认容量
+
+                    time_steps = np.linspace(0, 24, time_points, endpoint=False) # endpoint=False 匹配 get_electricity_price
+
+                    prices_at_violations = [get_electricity_price(time_steps[idx]) for idx in violation_indices]
+                    print(f"Optimal Scenario: Prices at violations (€/kWh): {np.round(prices_at_violations, 3)}")
+
+                    # 加载并打印最优 SOC (使用已加载的 data['true_soc_values'])
+                    if 'true_soc_values' in data:
+                         optimal_soc_abs = np.array(data['true_soc_values'])
+                         optimal_soc_percent = (optimal_soc_abs / battery_capacity) * 100
+                         soc_at_violations = optimal_soc_percent[violation_indices]
+                         print(f"Optimal Scenario: SOC (%) at violations: {np.round(soc_at_violations, 1)}")
+                    else:
+                         print("Warning: 'true_soc_values' not loaded. Cannot print SOC at violations.")
+
+                except Exception as detail_e:
+                    print(f"Error getting details for violation points: {detail_e}")
+                # --- 详细信息结束 ---
+
+            # --- 详细信息结束 ---
+        except Exception as e:
+             print(f"Error calculating optimal raw net load: {e}")
+             optimal_analysis = {'raw_net_load': None, 'error': str(e)} # 标记错误
+    else:
+        print("Warning: Optimal charge/discharge power not found in HDF5. Cannot analyze optimal raw_net_load.")
+        optimal_analysis = {'raw_net_load': None} # 标记为不可用
+    analysis_results['optimal'] = optimal_analysis
+
+    # --- 处理选定的低成本场景 ---
+    summary_stats = []
+    for error, scenarios in selected_scenarios.items():
+        analysis_results[error] = []
+        if error not in data['groups']:
+             print(f"Warning: Data for error {error}kW not found in data['groups']. Skipping.")
+             continue
+        charge_all = data['groups'][error]['charge_power']
+        discharge_all = data['groups'][error]['discharge_power']
+
+        for i, scenario_id in enumerate(scenarios['scenario_ids']):
+            try:
+                # 确保索引有效
+                if scenario_id >= len(charge_all) or scenario_id >= len(discharge_all):
+                     print(f"Warning: Invalid scenario_id {scenario_id} for error {error}kW. Skipping.")
+                     continue
+
+                charge_power = charge_all[scenario_id]
+                discharge_power = discharge_all[scenario_id]
+
+                raw_net_load = calculate_raw_net_load(
+                    data['true_load'], data['true_pv'],
+                    charge_power, discharge_power
+                )
+                violations = raw_net_load < constraint_threshold
+                violation_count = np.sum(violations)
+                violation_indices = np.where(violations)[0]
+                violation_magnitude = np.sum(np.maximum(0, constraint_threshold - raw_net_load[violation_indices]))
+
+                scenario_result = {
+                    'scenario_id': scenario_id,
+                    'raw_net_load': raw_net_load,
+                    'violation_count': violation_count,
+                    'violation_magnitude': violation_magnitude
+                }
+                analysis_results[error].append(scenario_result)
+                summary_stats.append({'error': error, 'scenario_id': scenario_id, 'violations': violation_count, 'magnitude': violation_magnitude})
+                # print(f"Error {error}kW - Scenario {scenario_id}: Violations={violation_count}, Total Magnitude={violation_magnitude:.2f}")
+            except Exception as e:
+                 print(f"Error processing Error {error}kW - Scenario {scenario_id}: {e}")
+                 analysis_results[error].append({'scenario_id': scenario_id, 'error': str(e)})
+
+
+    # --- 打印总结统计 ---
+    if summary_stats:
+        summary_df = pd.DataFrame(summary_stats)
+        print("\nLow Cost Scenarios Constraint Violation Summary:")
+        print(summary_df.groupby('error').agg(
+            count=('scenario_id', 'size'),
+            avg_violations=('violations', 'mean'),
+            avg_magnitude=('magnitude', 'mean')
+        ))
+
+    # --- 可视化对比 (绘制第一个低成本场景与最优场景的对比) ---
+    try:
+        plt.figure(figsize=(15, 7))
+        plot_optimal = False
+        if analysis_results['optimal'].get('raw_net_load') is not None:
+             plt.plot(time, analysis_results['optimal']['raw_net_load'], label='Optimal Raw Net Load', color='grey', linestyle=':', linewidth=1.5)
+             # 绘制最优最终净负荷 (来自H5)
+             plt.plot(time, data['true_net_load'], label='Optimal Final Net Load', color='red', linestyle='-.', linewidth=1.5, alpha=0.7)
+             plot_optimal = True
+
+        # 选择一个低成本场景绘制
+        example_error = next(iter(selected_scenarios.keys()), None)
+        plot_example = False
+        if example_error and analysis_results.get(example_error):
+            example_scenario_data = next((item for item in analysis_results[example_error] if 'error' not in item), None) # 找第一个成功的
+            if example_scenario_data:
+                example_id = example_scenario_data['scenario_id']
+                # 绘制原始净负荷
+                plt.plot(time, example_scenario_data['raw_net_load'], label=f'Low Cost (Err {example_error}, Scen {example_id}) Raw Net Load', color='purple', linewidth=1.5)
+                # 从H5加载其最终净负荷
+                final_net_load_low_cost = data['groups'][example_error]['true_net_load'][example_id]
+                plt.plot(time, final_net_load_low_cost, label=f'Low Cost (Err {example_error}, Scen {example_id}) Final Net Load', color='green', linewidth=1.5)
+                plot_example = True
+
+        if plot_optimal or plot_example: # 只有画了东西才加其他元素
+            plt.axhline(constraint_threshold, color='black', linestyle='--', label=f'{constraint_threshold}kW Constraint', linewidth=1)
+            plt.title('Raw Net Load vs. Constraint Comparison (Optimal vs. Example Low Cost)')
+            plt.xlabel('Time (h)')
+            plt.ylabel('Power (kW)')
+            plt.legend()
+            plt.grid(True, linestyle='--', alpha=0.5)
+            plt.ylim(bottom=min(0, plt.ylim()[0])) # 确保y轴从0或更低开始
+            plt.tight_layout()
+            save_path = output_path / 'constraint_interaction_comparison.png'
+            plt.savefig(save_path, dpi=300)
+            print(f"Constraint comparison plot saved to {save_path}")
+        else:
+             print("Skipping constraint comparison plot: No valid data to plot.")
+
+    except Exception as e:
+        print(f"Error during constraint visualization: {e}")
+    finally:
+        plt.close() # 确保关闭图形
+
+    print("--- Constraint Interaction Analysis Finished ---")
+    return analysis_results
+# --- 分析函数结束 ---
+
+
 if __name__ == '__main__':
     try:
         # 配置参数
@@ -251,9 +462,15 @@ if __name__ == '__main__':
         
         # 新增场景筛选和绘图
         selected = select_low_cost_scenarios(data)
-        plot_selected_scenarios(data, selected, output_dir)
-        
-        print(f"分析结果已保存至：{output_dir}")
+        if selected: # 只有筛选到场景才绘图和分析
+            plot_selected_scenarios(data, selected, output_dir)
+            # 调用新增的约束分析函数
+            constraint_analysis = analyze_constraint_interaction(data, selected, output_dir)
+            # (可选) 在这里可以对 constraint_analysis 结果做进一步处理或打印
+        else:
+            print("No low-cost scenarios selected, skipping detailed plotting and constraint analysis.")
+
+        print(f"\nAnalysis complete. Results saved to: {output_dir}")
     
     except Exception as e:
         print(f"Fatal error: {str(e)}")
